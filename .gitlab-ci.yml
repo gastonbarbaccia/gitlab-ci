@@ -1,0 +1,176 @@
+stages:
+  - building
+  - testing
+  - scanning
+  - staging
+  - deploying
+
+image: lorisleiva/laravel-docker:latest
+
+
+
+variables:
+  MYSQL_DATABASE: blog
+  MYSQL_ROOT_PASSWORD: ''
+  MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+  DB_USERNAME: root
+  DB_PASSWORD: ''
+  DB_HOST: 'mysql'
+
+# The job's name.
+composer:
+
+  # The job's stage (build, test or deploy).
+  stage: building
+
+  services:
+    - mysql:latest
+  
+  # What to run on the job.
+  script:
+      - composer install --prefer-dist --no-ansi --no-interaction --no-progress --no-scripts
+      - cp .env.develop .env
+      - php artisan key:generate
+      - php artisan route:clear
+      - php artisan migrate
+  # ...
+  artifacts:
+  
+    # (Optional) Give it an expiration date, 
+    # after that period you won't be able to 
+    # download them via the UI anymore.
+      expire_in: 1 month
+    
+    # Define what to output from the job.
+      paths:
+      - vendor/
+      - .env
+
+  cache:
+  
+    # The variable CI_COMMIT_REF_SLUG 
+    # refers to the slug of the branch.
+    # For example: `master` for the master branch.
+    # We use the `composer` suffix to avoid conflicts with
+    # the `npm` cache that we'll define next.
+      key: ${CI_COMMIT_REF_SLUG}-composer
+    
+    # Define what to cache.
+      paths:
+        - vendor/
+
+npm:
+  # Same stage as `composer` so that they run in parallel.
+  stage: building
+
+  # Cache the `node_modules` folder
+  # using the `npm` suffix on the key.
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-npm
+    paths:
+      - node_modules/
+
+  
+  # Install and compile.
+  script:
+      - npm install
+      - npm run production
+  
+
+  # Provide the other jobs of the pipeline with
+  # the node dependencies and the compiled assets.
+  artifacts:
+    expire_in: 1 month
+    paths:
+      - node_modules/
+
+
+phpcpd:
+  stage: testing
+  script:
+    - test -f phpcpd.phar || curl -L https://phar.phpunit.de/phpcpd.phar -o phpcpd.phar
+    - php phpcpd.phar app/ --min-lines=50
+  dependencies: []
+  cache:
+    paths:
+      - phpcpd.phar
+      
+
+phpunit:
+  stage: testing
+  # List of jobs from which it will download the artifacts.
+  dependencies:
+    - composer
+  script:
+    - phpunit --coverage-text --colors=never
+    - vendor/bin/phpunit --log-junit report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+  allow_failure: true
+
+codestyle:
+  stage: testing
+  dependencies: []
+  script:
+    - phpcs --standard=PSR2 --extensions=php --ignore=app/Support/helpers.php app
+  allow_failure: true
+
+
+sonarcloud-check:
+  stage: scanning
+  image:
+      name: sonarsource/sonar-scanner-cli:latest
+      entrypoint: [""]
+  script:
+      - sonar-scanner
+  allow_failure: true
+
+
+owasp_dependency_check:
+  image:
+      name: registry.gitlab.com/gitlab-ci-utils/docker-dependency-check:latest
+      entrypoint: [""]
+  stage: scanning
+  script:
+      # Job will scan the project root folder and fail if any vulnerabilities with CVSS > 0 are found
+      - /usr/share/dependency-check/bin/dependency-check.sh --scan "./" --format ALL --project "$CI_PROJECT_NAME" --failOnCVSS 0
+      # Dependency Check will only fail the job based on CVSS scores, and in some cases vulnerabilities do not
+      # have CVSS scores (e.g. those from NPM audit), so they don't cause failure.  To fail for any vulnerabilities
+      # grep the resulting report for any "vulnerabilities" sections and exit if any are found (count > 0).
+      - if [ $(grep -c "vulnerabilities" dependency-check-report.json) -gt 0 ]; then exit 2; fi
+  allow_failure: true
+  artifacts:
+      when: always
+      paths:
+         # Save the HTML and JSON report artifacts
+         - "./dependency-check-report.html"
+         - "./dependency-check-report.json"
+
+
+
+deploy_staging:
+  stage: deploying
+  image: alpine:latest
+  before_script:
+    - 'command -v ssh-agent >/dev/null || ( apk add --update openssh )' 
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H $VM_IPADDRESS >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - rm -rf node_modules 
+    - rm -rf vendor 
+    - scp -r /builds/gastonbarbaccia/blog/* ubuntu@$VM_IPADDRESS:/var/www/blog/
+    - ssh $SSH_USER@$VM_IPADDRESS 'cd /var/www/blog/; composer install; npm install; sudo chmod 777 -R storage/; sudo chmod 777 -R bootstrap/'
+  artifacts:
+    paths:
+      - ./
+  environment:  
+    name: staging
+    url: http://$VM_IPADDRESS
+
+ 
