@@ -1,0 +1,24 @@
+image: php:8.0.2
+before_script:
+  - apt-get update -qq
+  - apt-get install -y -qq git
+phpunit tests:
+  stage: test
+  script:
+  - curl -sS https://getcomposer.org/installer | php
+  - php composer.phar install --prefer-dist --no-ansi --no-interaction --no-progress --no-scripts
+  - cp .env.develop .env
+  - php artisan key:generate
+  - vendor/bin/phpunit tests
+deploy to heroku:
+  stage: deploy
+  image: php:7.2
+  script:
+  - apt-get install -y ruby
+  - gem install faraday -v 1.9.3
+  - gem install dpl
+  - dpl --provider=heroku --app=$HEROKU_APP --api-key=$HEROKU_API_KEY
+  environment:  
+    name: production
+    url: https://$HEROKU_APP.herokuapp.com/
+
