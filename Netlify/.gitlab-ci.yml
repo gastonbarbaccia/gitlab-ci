@@ -12,7 +12,7 @@ deploy:
   stage: deploy
   environment:
     name: production
-    url: https://serene-turing-704833.netlify.app
+    url: $URL_PRODUCTION
   only:
     - main
   script:
